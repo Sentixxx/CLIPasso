@@ -4,13 +4,13 @@ import torch.nn as nn
 class GCNConv(nn.Module):
     def __init__(
         self,
-        in_channels: int,
-        out_channels: int,
-        improved: bool = False,
-        cached: bool = False,
-        add_self_loops: bool = True,
-        normalize: bool = True,
-        bias: bool = True,
+        in_channels: int, # 输入特征维度
+        out_channels: int, # 输出特征维度
+        improved: bool = False, # 是否使用改进的GCN A~ = A + 2I(true)
+        cached: bool = False, # 是否缓存计算的A~
+        add_self_loops: bool = True, # 是否添加自环
+        normalize: bool = True, # 是否归一化
+        bias: bool = True, # 是否使用偏置
     ) -> None:
         super().__init__()
         self.in_channels = in_channels
