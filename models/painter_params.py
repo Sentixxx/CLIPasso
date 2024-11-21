@@ -58,6 +58,7 @@ class Painter(torch.nn.Module):
         self.define_attention_input(target_im)
         self.mask = mask
         self.attention_map = self.set_attention_map() if self.attention_init else None
+        self.control_points_set = []
         
         self.thresh = self.set_attention_threshold_map() if self.attention_init else None
         self.strokes_counter = 0 # counts the number of calls to "get_path"        
@@ -131,6 +132,8 @@ class Painter(torch.nn.Module):
         points = torch.tensor(points).to(self.device)
         points[:, 0] *= self.canvas_width
         points[:, 1] *= self.canvas_height
+
+        self.control_points_set.append(points)     
         
         path = pydiffvg.Path(num_control_points = self.num_control_points,
                                 points = points,
