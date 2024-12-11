@@ -74,12 +74,6 @@ if args.colab:
     print(f"Results will be saved to \n[{output_dir}] ...")
     print("=" * 50)
 
-seeds = list(range(0, args.num_sketches * 1000, 1000))
-
-exit_codes = []
-manager = mp.Manager()
-losses_all = manager.dict()
-
 
 def run(seed, wandb_name):
     exit_code = sp.run(["python", "painterly_rendering.py", target,
@@ -133,26 +127,30 @@ def display_(seed, wandb_name):
                     ))
             display(SVG(f"{path_to_svg}/svg_iter{i}.svg"))
 
-    
-    
-if multiprocess:
-    ncpus = 10
-    P = mp.Pool(ncpus)  # Generate pool of workers
+if __name__ == "__main__":
+    seeds = list(range(0, args.num_sketches * 1000, 1000))
 
-for seed in seeds:
-    wandb_name = f"{test_name}_{args.num_strokes}strokes_seed{seed}"
+    exit_codes = []
+    manager = mp.Manager()
+    losses_all = manager.dict()
     if multiprocess:
-        P.apply_async(run, (seed, wandb_name))
-    else:
-        run(seed, wandb_name)
+        ncpus = 10
+        P = mp.Pool(ncpus)  # Generate pool of workers
 
-if args.display:
-    time.sleep(10)
-    P.apply_async(display_, (0, f"{test_name}_{args.num_strokes}strokes_seed0"))
+    for seed in seeds:
+        wandb_name = f"{test_name}_{args.num_strokes}strokes_seed{seed}"
+        if multiprocess:
+            P.apply_async(run, (seed, wandb_name))
+        else:
+            run(seed, wandb_name)
 
-if multiprocess:
-    P.close()
-    P.join()  # start processes
-sorted_final = dict(sorted(losses_all.items(), key=lambda item: item[1]))
-copyfile(f"{output_dir}/{list(sorted_final.keys())[0]}/best_iter.svg",
-         f"{output_dir}/{list(sorted_final.keys())[0]}_best.svg")
+    if args.display:
+        time.sleep(10)
+        P.apply_async(display_, (0, f"{test_name}_{args.num_strokes}strokes_seed0"))
+
+    if multiprocess:
+        P.close()
+        P.join()  # start processes
+    sorted_final = dict(sorted(losses_all.items(), key=lambda item: item[1]))
+    copyfile(f"{output_dir}/{list(sorted_final.keys())[0]}/best_iter.svg",
+            f"{output_dir}/{list(sorted_final.keys())[0]}_best.svg")

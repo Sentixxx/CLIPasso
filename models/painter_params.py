@@ -11,6 +11,7 @@ from scipy.ndimage.filters import gaussian_filter
 from skimage.color import rgb2gray
 from skimage.filters import threshold_otsu
 from torchvision import transforms
+from gcn import GCNConv
 
 
 class Painter(torch.nn.Module):
@@ -36,6 +37,8 @@ class Painter(torch.nn.Module):
 
         self.shapes = []
         self.shape_groups = []
+        self.shapess = []
+        self.shape_groupss = []
         self.device = device
         self.canvas_width, self.canvas_height = imsize, imsize
         self.points_vars = []
@@ -65,6 +68,125 @@ class Painter(torch.nn.Module):
         self.epoch = 0
         self.final_epoch = args.num_iter - 1
         
+    def get_adj_matrix(self):
+        def computeCosineSimilarity(pointA: torch.Tensor, pointB: torch.Tensor):
+            dot_product = torch.sum(pointA * pointB)
+            norm_a = torch.sqrt(torch.sum(pointA * pointA))
+            norm_b = torch.sqrt(torch.sum(pointB * pointB))
+            eps = 1e-8
+            return dot_product / (norm_a * norm_b + eps)
+        def getAttention(point: torch.Tensor, attention_map: torch.Tensor):
+            h, w = attention_map.shape
+            x, y = point[0], point[1]
+            
+            if x < 0 or x >= 1 or y < 0 or y >= 1:
+                return torch.tensor(0.0, device=point.device)
+                
+            x = self.canvas_width * x
+            y = self.canvas_height * y
+            x0, y0 = torch.floor(x).long(), torch.floor(y).long()
+            x1, y1 = x0 + 1, y0 + 1
+            
+            x0 = torch.clamp(x0, 0, w-1)
+            x1 = torch.clamp(x1, 0, w-1)
+            y0 = torch.clamp(y0, 0, h-1)
+            y1 = torch.clamp(y1, 0, h-1)
+            
+            wa = (x1.float() - x) * (y1.float() - y)
+            wb = (x1.float() - x) * (y - y0.float())
+            wc = (x - x0.float()) * (y1.float() - y)
+            wd = (x - x0.float()) * (y - y0.float())
+            
+            return (wa * attention_map[y0, x0] + 
+                    wb * attention_map[y1, x0] +
+                    wc * attention_map[y0, x1] + 
+                    wd * attention_map[y1, x1])
+
+        def computePointsCosineSimilarity(pointsA: torch.Tensor, pointsB: torch.Tensor):
+            assert len(pointsA) == len(pointsB)
+            
+            diffA = pointsA[1:] - pointsA[:-1]
+            diffB = pointsB[1:] - pointsB[:-1]
+            vectors = zip(diffA, diffB)
+            
+            cosine_sims = torch.stack([
+                computeCosineSimilarity(vecA, vecB) 
+                for vecA, vecB in vectors
+            ])
+            
+            return cosine_sims.mean()
+        def computeAttentionSimilarity(pointsA: torch.Tensor, pointsB: torch.Tensor):
+            assert len(pointsA) == len(pointsB)
+            
+            attention_A = torch.stack([
+                 getAttention(p, self.attention_map) for p in pointsA
+            ])
+            attention_B = torch.stack([
+                getAttention(p, self.attention_map) for p in pointsB
+            ])
+            
+            att_mean_diff = torch.abs(attention_A.mean() - attention_B.mean())
+            att_std_diff = torch.abs(attention_A.std() - attention_B.std())
+            
+            return att_mean_diff + 0.5 * att_std_diff
+        
+        def calc_similarity(cosine_sim: torch.Tensor, attention_sim: torch.Tensor):
+            return torch.tanh(1.0 * (cosine_sim * 0.6 + attention_sim * 0.4))
+        
+        num_points = len(self.control_points_set)
+        adjacency_matrix = torch.zeros((num_points, num_points), 
+                                    dtype=torch.float32,
+                                    device=self.device)
+        
+        
+        cps = []
+        for points in self.control_points_set:
+            cps.append(points.clone().detach())
+        
+        for i in range(num_points):
+            for j in range(num_points):
+                if i == j:
+                    similarity = torch.tensor([1.], device=self.device)
+                    adjacency_matrix[i, j] = similarity
+                    # print("i == j")
+                    continue
+                    
+                cos_sim = computePointsCosineSimilarity(
+                    cps[i], 
+                    cps[j],
+                )
+                
+                att_sim = computeAttentionSimilarity(
+                    cps[i],
+                    cps[j],
+                )
+                
+                similarity = calc_similarity(cos_sim, att_sim)
+                if similarity < torch.tensor([0.4], device=self.device):
+                    similarity = torch.tensor([0.], device=self.device)
+                adjacency_matrix[i, j] = similarity
+        
+        rowsum = adjacency_matrix.sum(dim=1)
+
+        d_inv_sqrt = torch.pow(rowsum, -0.5)
+        d_inv_sqrt[torch.isinf(d_inv_sqrt)] = 0.
+
+        d_mat_inv_sqrt = torch.diag(d_inv_sqrt)
+
+        normalized_adj = d_mat_inv_sqrt @ adjacency_matrix @ d_mat_inv_sqrt
+        return normalized_adj
+    
+    def get_feature_matrix(self):
+        cps = []
+        for points in self.control_points_set:
+            cps.append(points.clone().detach().view(-1) / self.canvas_width)
+        return torch.stack(cps)
+    
+    def update_points_by_gcn(self, points_set):
+        points_set = points_set.view(16, 4, 2)
+        for i , points in enumerate(points_set):
+            self.control_points_set[i][:] = points.clone()
+        # print("self.control_points_set",self.control_points_set)
 
     def init_image(self, stage=0):
         if stage > 0:
@@ -80,7 +202,6 @@ class Painter(torch.nn.Module):
                                                     stroke_color = stroke_color)
                 self.shape_groups.append(path_group)
                 self.optimize_flag.append(True)
-
         else:
             num_paths_exists = 0
             if self.path_svg != "none":
@@ -95,7 +216,7 @@ class Painter(torch.nn.Module):
                 path_group = pydiffvg.ShapeGroup(shape_ids = torch.tensor([len(self.shapes) - 1]),
                                                     fill_color = None,
                                                     stroke_color = stroke_color)
-                self.shape_groups.append(path_group)        
+                self.shape_groups.append(path_group)
             self.optimize_flag = [True for i in range(len(self.shapes))]
         
         img = self.render_warp()
@@ -122,7 +243,7 @@ class Painter(torch.nn.Module):
         self.num_control_points = torch.zeros(self.num_segments, dtype = torch.int32) + (self.control_points_per_seg - 2)
         p0 = self.inds_normalised[self.strokes_counter] if self.attention_init else (random.random(), random.random())
         points.append(p0)
-
+        
         for j in range(self.num_segments):
             radius = 0.05
             for k in range(self.control_points_per_seg - 1):
@@ -132,8 +253,7 @@ class Painter(torch.nn.Module):
         points = torch.tensor(points).to(self.device)
         points[:, 0] *= self.canvas_width
         points[:, 1] *= self.canvas_height
-
-        self.control_points_set.append(points)     
+        self.control_points_set.append(points)
         
         path = pydiffvg.Path(num_control_points = self.num_control_points,
                                 points = points,
@@ -159,7 +279,7 @@ class Painter(torch.nn.Module):
             self.canvas_width, self.canvas_height, self.shapes, self.shape_groups)
         img = _render(self.canvas_width, # width
                     self.canvas_height, # height
-                    2,   # num_samples_x
+                    2,   # num_samples_x                                    
                     2,   # num_samples_y
                     0,   # seed
                     None,
@@ -192,7 +312,8 @@ class Painter(torch.nn.Module):
         
     def save_svg(self, output_dir, name):
         pydiffvg.save_svg('{}/{}.svg'.format(output_dir, name), self.canvas_width, self.canvas_height, self.shapes, self.shape_groups)
-
+    def save_svgs(self, output_dir, name):
+        pydiffvg.save_svg('{}/{}.svg'.format(output_dir, name), self.canvas_width, self.canvas_height, self.shapess, self.shape_groupss) 
 
     def dino_attn(self):
         patch_size=8 # dino hyperparameter

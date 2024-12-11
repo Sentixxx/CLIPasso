@@ -116,12 +116,24 @@ def parse_arguments():
     if not os.path.exists(args.output_dir):
         os.mkdir(args.output_dir)
 
+    adj_logs_dir = f"{args.output_dir}/adj_logs"
+    color_logs_dir = f"{args.output_dir}/color_logs"
     jpg_logs_dir = f"{args.output_dir}/jpg_logs"
     svg_logs_dir = f"{args.output_dir}/svg_logs"
+    matrix_logs_pre_dir = f"{args.output_dir}/matrix_pre_logs"
+    matrix_logs_after_dir = f"{args.output_dir}/matrix_after_logs"
     if not os.path.exists(jpg_logs_dir):
         os.mkdir(jpg_logs_dir)
     if not os.path.exists(svg_logs_dir):
         os.mkdir(svg_logs_dir)
+    if not os.path.exists(adj_logs_dir):
+        os.mkdir(adj_logs_dir)
+    if not os.path.exists(color_logs_dir):
+        os.mkdir(color_logs_dir)
+    if not os.path.exists(matrix_logs_pre_dir):
+        os.mkdir(matrix_logs_pre_dir)
+    if not os.path.exists(matrix_logs_after_dir):
+        os.mkdir(matrix_logs_after_dir)
 
     if args.use_wandb:
         wandb.init(project=args.wandb_project_name, entity=args.wandb_user,
