@@ -23,7 +23,7 @@ from tqdm.auto import tqdm, trange
 import config
 import sketch_utils as utils
 from models.loss import Loss
-from models.painter_params import Painter, PainterOptimizer
+from models.painter_params_rare import Painter, PainterOptimizer
 from IPython.display import display, SVG
 
 
@@ -47,6 +47,7 @@ def get_target(args):
         new_image.paste(target, (0, 0), target)
         target = new_image
     target = target.convert("RGB")
+
     masked_im, mask = utils.get_mask_u2net(args, target)
     if args.mask_object:
         target = masked_im
@@ -76,6 +77,7 @@ def main(args):
     optimizer = PainterOptimizer(args, renderer)
     counter = 0
     configs_to_save = {"loss_eval": []}
+    #基础loss，方便更新
     best_loss, best_fc_loss = 100, 100
     best_iter, best_iter_fc = 0, 0
     min_delta = 1e-5
@@ -92,6 +94,7 @@ def main(args):
         epoch_range = tqdm(range(args.num_iter))
 
     for epoch in epoch_range:
+        #进度条设置和学习率更新设置
         if not args.display:
             epoch_range.refresh()
         renderer.set_random_noise(epoch)
@@ -100,13 +103,34 @@ def main(args):
 
         start = time.time()
         optimizer.zero_grad_()
+        test=[]
+
+            # # 使用新的张量代替原地操作
+            # path.points = path.points.clone()  # 克隆一份 path.points 以避免原地修改
+            # path.points[:, 0] = path.points[:, 0] * 224  # 修改克隆后的张量
+            # path.points[:, 1] = path.points[:, 1]* 224
+        # for i, path in enumerate(renderer.shapes):
+        #     if path.points is not None:
+        #         # 直接打印所有小于 0 的点
+        #         if (path.points < 0).any():  # 如果有任何小于 0 的值
+        #             print(f"Path {i} contains points with negative values:")
+        #             print(path.points[path.points < 0])  # 直接打印小于 0 的点
+        for i ,path in enumerate(renderer.shapes):
+            print(path.points.requires_grad)
+        #get_image返回的是NCWH
         sketches = renderer.get_image().to(args.device)
         losses_dict = loss_func(sketches, inputs.detach(
         ), renderer.get_color_parameters(), renderer, counter, optimizer)
         loss = sum(list(losses_dict.values()))
         loss.backward()
+
         optimizer.step_()
+
         if epoch % args.save_interval == 0:
+            # # 获取控制点参数列表
+            control_points = renderer.get_points_parans()
+            # 保存为 .pt 文件（PyTorch 张量格式）
+            torch.save(control_points, f"{args.output_dir}/control_points_epoch.pt")
             utils.plot_batch(inputs, sketches, f"{args.output_dir}/jpg_logs", counter,
                              use_wandb=args.use_wandb, title=f"iter{epoch}.jpg")
             renderer.save_svg(
@@ -126,8 +150,7 @@ def main(args):
                         best_fc_loss = losses_dict_eval["fc"].item(
                         ) / args.clip_fc_loss_weight
                         best_iter_fc = epoch
-                # print(
-                #     f"eval iter[{epoch}/{args.num_iter}] loss[{loss.item()}] time[{time.time() - start}]")
+                print( f"eval iter[{epoch}/{args.num_iter}] loss[{loss.item()}] time[{time.time() - start}]")
 
                 cur_delta = loss_eval.item() - best_loss
                 if abs(cur_delta) > min_delta:

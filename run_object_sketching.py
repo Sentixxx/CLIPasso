@@ -64,6 +64,7 @@ if not torch.cuda.is_available():
     print("CUDA is not configured with GPU, running with CPU instead.")
     print("Note that this will be very slow, it is recommended to use colab.")
 
+#结果显示
 if args.colab:
     print("=" * 50)
     print(f"Processing [{args.target_file}] ...")
@@ -76,13 +77,11 @@ if args.colab:
 
 seeds = list(range(0, args.num_sketches * 1000, 1000))
 
-exit_codes = []
-manager = mp.Manager()
-losses_all = manager.dict()
+
 
 
 def run(seed, wandb_name):
-    exit_code = sp.run(["python", "painterly_rendering.py", target,
+    exit_code = sp.run(["python", "painterly_rendering_new.py", target,
                             "--num_paths", str(args.num_strokes),
                             "--output_dir", output_dir,
                             "--wandb_name", wandb_name,
@@ -101,15 +100,17 @@ def run(seed, wandb_name):
 
     config = np.load(f"{output_dir}/{wandb_name}/config.npy",
                      allow_pickle=True)[()]
+    #提取损失评估数据
     loss_eval = np.array(config['loss_eval'])
     inds = np.argsort(loss_eval)
     losses_all[wandb_name] = loss_eval[inds][0]
  
-    
+#展示图片
 def display_(seed, wandb_name):
     path_to_svg = f"{output_dir}/{wandb_name}/svg_logs/"
     intervals_ = list(range(0, num_iter, save_interval))
     filename = f"svg_iter0.svg"
+    #显示滑块和输出框
     display(IntSlider())
     out = Output()
     display(out)
@@ -133,26 +134,30 @@ def display_(seed, wandb_name):
                     ))
             display(SVG(f"{path_to_svg}/svg_iter{i}.svg"))
 
-    
-    
-if multiprocess:
-    ncpus = 10
-    P = mp.Pool(ncpus)  # Generate pool of workers
 
-for seed in seeds:
-    wandb_name = f"{test_name}_{args.num_strokes}strokes_seed{seed}"
+if __name__ == "__main__":
+    exit_codes = []
+    manager = mp.Manager()
+    losses_all = manager.dict()
+        
     if multiprocess:
-        P.apply_async(run, (seed, wandb_name))
-    else:
-        run(seed, wandb_name)
+        ncpus = 10
+        P = mp.Pool(ncpus)  # Generate pool of workers
+    #创建文件夹，遍历seed，运行run
+    for seed in seeds:
+        wandb_name = f"{test_name}_{args.num_strokes}strokes_seed{seed}"
+        if multiprocess:
+            P.apply_async(run, (seed, wandb_name))
+        else:
+            run(seed, wandb_name)
 
-if args.display:
-    time.sleep(10)
-    P.apply_async(display_, (0, f"{test_name}_{args.num_strokes}strokes_seed0"))
+    if args.display:
+        time.sleep(10)
+        P.apply_async(display_, (0, f"{test_name}_{args.num_strokes}strokes_seed0"))
 
-if multiprocess:
-    P.close()
-    P.join()  # start processes
-sorted_final = dict(sorted(losses_all.items(), key=lambda item: item[1]))
-copyfile(f"{output_dir}/{list(sorted_final.keys())[0]}/best_iter.svg",
-         f"{output_dir}/{list(sorted_final.keys())[0]}_best.svg")
+    if multiprocess:
+        P.close()
+        P.join()  # start processes
+    sorted_final = dict(sorted(losses_all.items(), key=lambda item: item[1]))
+    copyfile(f"{output_dir}/{list(sorted_final.keys())[0]}/best_iter.svg",
+            f"{output_dir}/{list(sorted_final.keys())[0]}_best.svg")
