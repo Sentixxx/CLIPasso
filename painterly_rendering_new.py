@@ -24,7 +24,7 @@ from models.cnn_model import SimpleCNN
 from models.gcn_model import GCN
 from bezier_renderer import BezierRenderer
 from models.loss import Loss
-from models.painter_params import Painter, PainterOptimizer
+from models.painter_params_modified import Painter, PainterOptimizer
 
 from data_utils import compute_cosine_similarity
 
@@ -86,7 +86,7 @@ def train(epoch, args, renderer, optimizer, loss_func, inputs,
         
     # 生成掩码图像
     bezier_renderer = BezierRenderer(224,224)
-    bezier_masked = bezier_renderer.mask_img(renderer.control_points_set, 224, 224)
+    bezier_masked = bezier_renderer.mask_img(renderer.control_points_set)
     
     # 特征提取和GCN处理
     feature = cnn_model(bezier_masked).view(16, -1)
@@ -102,8 +102,8 @@ def train(epoch, args, renderer, optimizer, loss_func, inputs,
     
     # 保存中间结果
     if epoch % args.save_interval == 0:
-        img_grid = torchvision.utils.make_grid(bezier_masked, nrow=8, padding=2)
-        writer.add_image(f'{epoch}images_grid', img_grid)
+        # img_grid = torchvision.utils.make_grid(bezier_masked, nrow=8, padding=2)
+        # writer.add_image(f'{epoch}images_grid', img_grid,dataformats='HWC')
         utils.save_cosine_similarity_heatmap(cos_matrix, save_path, epoch, "cos_matrix")
         
         control_points = renderer.get_points_parans()
@@ -140,7 +140,7 @@ def main(args):
     cnn_model = SimpleCNN().to(args.device)
     gcn_model = GCN(input_dim=128, output_dim=4).to(args.device)
     model_parameters = list(cnn_model.parameters()) + list(gcn_model.parameters())
-    optimizer = PainterOptimizer(args, model_parameters, renderer)
+    optimizer = PainterOptimizer(args, renderer, model_parameters)
     
     # 初始化训练
     renderer.set_random_noise(0)
