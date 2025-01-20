@@ -137,14 +137,14 @@ class BezierRenderer:
         Returns:
             torch.Tensor: 每条曲线对应的mask图像,CHW格式,大小64x64
         """
-        img_full = self.render_img_raw(control_points)
+        img_orig = self.render_img_raw(control_points)
         img_beziers = self.render_beziers(control_points)
         
         img_masked = []
         for img_mask in img_beziers:
-            # 生成二值mask
-            binary_mask = (img_mask > 0).float() * 255
-            reverse_mask = 255 - binary_mask
+            # 生成二值mask,注意不要乘以255导致梯度消失
+            binary_mask = (img_mask > 0).float()
+            reverse_mask = 1 - binary_mask
             
             # 获取非零区域的边界框
             mask_indices = self._get_nonzero_indices(reverse_mask)
@@ -153,12 +153,12 @@ class BezierRenderer:
                 
                 # 生成矩形mask并裁剪图像
                 rect_mask = torch.zeros_like(reverse_mask)
-                rect_mask[y_min:y_max+1, x_min:x_max+1] = 255
+                rect_mask[y_min:y_max+1, x_min:x_max+1] = 1.0
                 
-                cropped = img_full * rect_mask
+                cropped = img_orig * rect_mask
                 cropped = cropped[y_min:y_max+1, x_min:x_max+1, :]
             else:
-                cropped = img_full * torch.zeros_like(reverse_mask)
+                cropped = img_orig * torch.zeros_like(reverse_mask)
                 
             # 转换为CHW格式并resize
             cropped = cropped.permute(2, 0, 1)
@@ -166,12 +166,12 @@ class BezierRenderer:
                 cropped = self._padding_resize(cropped)
                 
             cropped = F.resize(cropped, (64, 64))
-            img_masked.append(cropped / 255.0)
+            img_masked.append(cropped)  # 不除以255保持梯度
             
         img_masked = torch.stack(img_masked, dim=0)
         img_masked = img_masked.permute(1, 0, 2, 3)
 
-        return img_masked
+        return img_masked, img_orig
 
     def _get_nonzero_indices(self, mask):
         """获取mask中非零区域的边界框索引

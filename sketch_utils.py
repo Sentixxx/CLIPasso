@@ -106,9 +106,6 @@ def render_img_rgb_from_renderer(points, renderer):
     opacity = img[:, :, 3:4]
     img = opacity * img[:, :, :3] + torch.ones(img.shape[0], img.shape[1], 3, device=renderer.device) * (1 - opacity)
     img = img[:, :, :3]
-    # Convert img from HWC to NCHW
-    img = img.unsqueeze(0)
-    img = img.permute(0, 3, 1, 2).to(renderer.device)  # NHWC -> NCHW
 
     return img
 

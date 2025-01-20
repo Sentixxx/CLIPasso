@@ -20,13 +20,31 @@ from torch.utils.tensorboard import SummaryWriter
 
 import config
 import sketch_utils as utils
-from models.cnn_model import SimpleCNN
-from models.gcn_model import GCN
+from models.self_model import SimpleCNN
+from models.self_model import GCN
 from bezier_renderer import BezierRenderer
 from models.loss import Loss
 from models.painter_params_modified import Painter, PainterOptimizer
+import matplotlib.pyplot as plt
 
-from data_utils import compute_cosine_similarity
+from data_utils import compute_cosine_similarity,check_gradients
+
+def render_img_from_renderer(points, renderer, epoch, save_path):
+    img = utils.render_img_rgb_from_renderer(points, renderer)
+    
+    if epoch % 10 == 0:
+        save_dir = os.path.join(save_path, f"{epoch}_out.png")
+        # print(img2.shape)
+        img2 = img.clone().detach().cpu().numpy()
+        # 使用 matplotlib 绘制图像
+        plt.imshow(img2)
+        plt.axis('off')  # 关闭坐标轴
+        plt.savefig(save_dir)
+        plt.clf()
+        plt.close()
+    img = img.unsqueeze(0)
+    img = img.permute(0, 3, 1, 2).to(renderer.device)  # NHWC -> NCHW
+    return img
 
 def load_renderer(args, target_im=None, mask=None):
     renderer = Painter(num_strokes=args.num_paths, args=args,
@@ -68,7 +86,7 @@ def get_target(args):
 
 
 
-def train(epoch, args, renderer, optimizer, loss_func, inputs, 
+def train(epoch, args, renderer: Painter, optimizer: PainterOptimizer, loss_func, inputs, 
                    cnn_model, gcn_model, writer, save_path, counter,epoch_range):
     """训练一个epoch"""
     if not args.display:
@@ -83,32 +101,52 @@ def train(epoch, args, renderer, optimizer, loss_func, inputs,
     # 获取控制点
     for i, path in enumerate(renderer.shapes):
         renderer.control_points_set[i] = path.points
-        
+    
+    points_orig = torch.stack(renderer.control_points_set, dim=0)
+    points_orig = points_orig.clone().detach()
+    
     # 生成掩码图像
     bezier_renderer = BezierRenderer(224,224)
-    bezier_masked = bezier_renderer.mask_img(renderer.control_points_set)
+    bezier_masked, img_orig = bezier_renderer.mask_img(renderer.control_points_set)
+    
+    img_masked = bezier_masked.permute(1,0,2,3)
+    img_masked_grid = torchvision.utils.make_grid(img_masked, nrow=8, padding=2)
     
     # 特征提取和GCN处理
-    feature = cnn_model(bezier_masked).view(16, -1)
+    feature, control_points_set_hat = cnn_model(bezier_masked)
+    feature = feature.view(-1, 128)
     reg_matrix, cos_matrix = compute_cosine_similarity(feature)
+    
+    control_points_set_hat = torch.sigmoid(control_points_set_hat).view(16,-1,2)
+    control_points_set_hat = control_points_set_hat * renderer.canvas_width
+    
     new_points = gcn_model(feature, reg_matrix).view(-1, 4, 2)
-    sketches = utils.render_img_rgb_from_renderer(new_points, renderer).to(args.device)
-
+    
+    sketches = render_img_from_renderer(new_points, renderer, epoch, save_path).to(args.device)
+    
+    mes_loss = torch.nn.MSELoss()(control_points_set_hat, points_orig)
     # 计算损失并反向传播
     losses_dict = loss_func(sketches, inputs.detach(),
                           renderer.get_color_parameters(), renderer, counter, optimizer)
-    loss = sum(list(losses_dict.values()))
+    if epoch <= 100:
+        loss = mes_loss
+    else:
+        loss = sum(list(losses_dict.values())) + mes_loss
     loss.backward()
+    
+    optimizer.step_()
+    max_grad_norm = 1.0
+    torch.nn.utils.clip_grad_norm_(cnn_model.parameters(), max_grad_norm)
     
     # 保存中间结果
     if epoch % args.save_interval == 0:
-        # img_grid = torchvision.utils.make_grid(bezier_masked, nrow=8, padding=2)
-        # writer.add_image(f'{epoch}images_grid', img_grid,dataformats='HWC')
         utils.save_cosine_similarity_heatmap(cos_matrix, save_path, epoch, "cos_matrix")
         
-        control_points = renderer.get_points_parans()
-        torch.save(control_points, f"{args.output_dir}/control_points_epoch.pt")
+        writer.add_image(f'{epoch}images_grid', img_masked_grid,dataformats='HWC')
+        writer.add_image(f'{epoch}img_orig', img_orig.permute(2,0,1))
         
+        torch.save(feature, f"{args.output_dir}/feature.pt")
+
         utils.plot_batch(inputs, sketches, f"{args.output_dir}/jpg_logs", counter,
                         use_wandb=args.use_wandb, title=f"iter{epoch}.jpg")
         renderer.save_svg(f"{args.output_dir}/svg_logs", f"svg_iter{epoch}")
@@ -152,37 +190,71 @@ def main(args):
     best_loss, best_fc_loss = 100, 100
     best_iter, best_iter_fc = 0, 0
     
+    min_delta = 1e-5
+    terminate = False
+    
     epoch_range = range(args.num_iter) if args.display else tqdm(range(args.num_iter))
     
     # 训练循环
     for epoch in epoch_range:
         loss, losses_dict, sketches = train(epoch, args, renderer, optimizer, loss_func,
                                           inputs, cnn_model, gcn_model, writer, 
-                                          save_path, counter,epoch_range)
+                                          save_path, counter, epoch_range)
         
         # 评估和记录
         if epoch % args.eval_interval == 0:
             with torch.no_grad():
-                losses_dict_eval = loss_func(sketches, inputs, 
-                                           renderer.get_color_parameters(),
-                                           renderer.get_points_parans(), 
-                                           counter, optimizer, mode="eval")
+                losses_dict_eval = loss_func(sketches, inputs, renderer.get_color_parameters(
+                ), renderer.get_points_parans(), counter, optimizer, mode="eval")
                 loss_eval = sum(list(losses_dict_eval.values()))
-                
-                # 更新最佳结果
-                if loss_eval.item() < best_loss:
-                    best_loss = loss_eval.item()
-                    best_iter = epoch
-                    utils.plot_batch(inputs, sketches, args.output_dir, counter,
-                                   use_wandb=args.use_wandb, title="best_iter.jpg")
-                    renderer.save_svg(args.output_dir, "best_iter")
-                    
-                # 记录到wandb
+                configs_to_save["loss_eval"].append(loss_eval.item())
+                for k in losses_dict_eval.keys():
+                    if k not in configs_to_save.keys():
+                        configs_to_save[k] = []
+                    configs_to_save[k].append(losses_dict_eval[k].item())
+                if args.clip_fc_loss_weight:
+                    if losses_dict_eval["fc"].item() < best_fc_loss:
+                        best_fc_loss = losses_dict_eval["fc"].item(
+                        ) / args.clip_fc_loss_weight
+                        best_iter_fc = epoch
+                # print(
+                #     f"eval iter[{epoch}/{args.num_iter}] loss[{loss.item()}] time[{time.time() - start}]")
+
+                cur_delta = loss_eval.item() - best_loss
+                if abs(cur_delta) > min_delta:
+                    if cur_delta < 0:
+                        best_loss = loss_eval.item()
+                        best_iter = epoch
+                        terminate = False
+                        utils.plot_batch(
+                            inputs, sketches, args.output_dir, counter, use_wandb=args.use_wandb, title="best_iter.jpg")
+                        renderer.save_svg(args.output_dir, "best_iter")
+
                 if args.use_wandb:
                     wandb.run.summary["best_loss"] = best_loss
                     wandb.run.summary["best_loss_fc"] = best_fc_loss
-                    wandb_dict = {"loss_eval": loss_eval.item()}
+                    wandb_dict = {"delta": cur_delta,
+                                  "loss_eval": loss_eval.item()}
+                    for k in losses_dict_eval.keys():
+                        wandb_dict[k + "_eval"] = losses_dict_eval[k].item()
                     wandb.log(wandb_dict, step=counter)
+
+                if abs(cur_delta) <= min_delta:
+                    if terminate:
+                        break
+                    # terminate = True
+
+        if counter == 0 and args.attention_init:
+            utils.plot_atten(renderer.get_attn(), renderer.get_thresh(), inputs, renderer.get_inds(),
+                             args.use_wandb, "{}/{}.jpg".format(
+                                 args.output_dir, "attention_map"),
+                             args.saliency_model, args.display_logs)
+
+        if args.use_wandb:
+            wandb_dict = {"loss": loss.item(), "lr": optimizer.get_lr()}
+            for k in losses_dict.keys():
+                wandb_dict[k] = losses_dict[k].item()
+            wandb.log(wandb_dict, step=counter)
                     
         counter += 1
         
