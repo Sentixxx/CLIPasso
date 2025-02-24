@@ -20,7 +20,7 @@ from U2Net_.model import U2NET
 
 def save_cosine_similarity_heatmap(reg_matrix, folder_path, epoch, name):
     """绘制余弦相似度矩阵的热力图
-    
+
     Args:
         reg_matrix: 余弦相似度矩阵 tensor
         folder_path: 保存路径
@@ -29,52 +29,52 @@ def save_cosine_similarity_heatmap(reg_matrix, folder_path, epoch, name):
     """
     # 设置图像大小和DPI以提高清晰度
     plt.figure(figsize=(10, 8), dpi=100)
-    
+
     # 转换为numpy数组
     cos_sim_matrix_np = reg_matrix.detach().cpu().numpy()
-    
+
     # 绘制热力图
     im = plt.imshow(cos_sim_matrix_np, cmap='YlOrRd', interpolation='nearest')
-    
+
     # 添加数值标注,只标注非零值
     for i in range(cos_sim_matrix_np.shape[0]):
         for j in range(cos_sim_matrix_np.shape[1]):
             if cos_sim_matrix_np[i, j] > 0:
-                plt.text(j, i, f'{cos_sim_matrix_np[i, j]:.2f}', 
-                        ha='center', va='center',
-                        color='black' if cos_sim_matrix_np[i, j] < 0.7 else 'white',
-                        fontsize=8)
-    
+                plt.text(j, i, f'{cos_sim_matrix_np[i, j]:.2f}',
+                         ha='center', va='center',
+                         color='black' if cos_sim_matrix_np[i, j] < 0.7 else 'white',
+                         fontsize=8)
+
     # 添加颜色条和标题
     plt.colorbar(im)
     plt.title(f'Cosine Similarity Matrix - Epoch {epoch}')
-    
+
     # 调整布局并保存
     plt.tight_layout()
     save_dir = os.path.join(folder_path, f"{epoch}_{name}.png")
     plt.savefig(save_dir, bbox_inches='tight')
+    plt.clf()
     plt.close()
 
-#绘制整张图片
-def render_img_rgb_from_renderer(points, renderer):
+
+# 绘制整张图片
+def render_img_rgb_from_renderer(points, renderer, epoch, save_path):
     """
     使用renderer渲染完整的草图
-    
+
     参数:
         points: 所有曲线的控制点,形状为(batch_size,num_points,2)
         renderer: 渲染器对象,包含画布大小等参数
-        
+
     返回:
         img: 渲染后的RGB图像,形状为(N,C,H,W)
     """
     points = points * 224
-    
+
     paths = []
     shape_groups = []
-    
+
     stroke_color = torch.tensor([0.0, 0.0, 0.0, 1.0])
-    
-    
 
     for i, control_points in enumerate(points):
         path = pydiffvg.Path(num_control_points=renderer.num_control_points,
@@ -89,23 +89,37 @@ def render_img_rgb_from_renderer(points, renderer):
 
     scene_args = pydiffvg.RenderFunction.serialize_scene( \
         renderer.canvas_width, renderer.canvas_height, paths, shape_groups)
-    
+
     # 背景图像
     background_image = torch.ones(renderer.canvas_height, renderer.canvas_width, 4)
     background_image[:, :, 0:3] = 1.0  # 设置RGB通道为1，表示白色
     background_image[:, :, 3] = 1.0  # 设置A通道为1，表示完全不透明background_image,
     render = pydiffvg.RenderFunction.apply
     img = render(renderer.canvas_width,  # width
-                  renderer.canvas_height,  # height
-                  2,  # num_samples_x
-                  2,  # num_samples_y
-                  0,  # seed
-                  background_image,
-                  *scene_args)
+                 renderer.canvas_height,  # height
+                 2,  # num_samples_x
+                 2,  # num_samples_y
+                 0,  # seed
+                 background_image,
+                 *scene_args)
 
     opacity = img[:, :, 3:4]
     img = opacity * img[:, :, :3] + torch.ones(img.shape[0], img.shape[1], 3, device=renderer.device) * (1 - opacity)
     img = img[:, :, :3]
+    if epoch % 10 == 0:
+        save_dir = os.path.join(save_path, f"{epoch}_out.png")
+        # print(img2.shape)
+        img2 = img.clone().detach().cpu().numpy()
+        # 使用 matplotlib 绘制图像
+        plt.imshow(img2)
+        plt.axis('off')  # 关闭坐标轴
+        plt.savefig(save_dir)
+        plt.clf()
+        plt.close()
+    # Convert img from HWC to NCHW
+    img = img.unsqueeze(0)
+
+    img = img.permute(0, 3, 1, 2).to(renderer.device)  # NHWC -> NCHW
 
     return img
 
@@ -125,7 +139,7 @@ def imwrite(img, filename, gamma=2.2, normalize=False, use_wandb=False, wandb_na
     if img.ndim == 2:
         # repeat along the third dimension
         img = np.expand_dims(img, 2)
-    img[:, :, :3] = np.power(img[:, :, :3], 1.0/gamma)
+    img[:, :, :3] = np.power(img[:, :, :3], 1.0 / gamma)
     img = (img * 255).astype(np.uint8)
 
     skimage.io.imsave(filename, img, check_contrast=False)
@@ -181,15 +195,15 @@ def log_sketch_summary_final(path_svg, use_wandb, device, epoch, loss, title):
         canvas_width, canvas_height, shapes, shape_groups)
     img = _render(canvas_width,  # width
                   canvas_height,  # height
-                  2,   # num_samples_x
-                  2,   # num_samples_y
-                  0,   # seed
+                  2,  # num_samples_x
+                  2,  # num_samples_y
+                  0,  # seed
                   None,
                   *scene_args)
 
     img = img[:, :, 3:4] * img[:, :, :3] + \
-        torch.ones(img.shape[0], img.shape[1], 3,
-                   device=device) * (1 - img[:, :, 3:4])
+          torch.ones(img.shape[0], img.shape[1], 3,
+                     device=device) * (1 - img[:, :, 3:4])
     img = img[:, :, :3]
     plt.imshow(img.cpu().numpy())
     plt.axis("off")
@@ -233,14 +247,14 @@ def read_svg(path_svg, device, multiply=False):
         canvas_width, canvas_height, shapes, shape_groups)
     img = _render(canvas_width,  # width
                   canvas_height,  # height
-                  2,   # num_samples_x
-                  2,   # num_samples_y
-                  0,   # seed
+                  2,  # num_samples_x
+                  2,  # num_samples_y
+                  0,  # seed
                   None,
                   *scene_args)
     img = img[:, :, 3:4] * img[:, :, :3] + \
-        torch.ones(img.shape[0], img.shape[1], 3,
-                   device=device) * (1 - img[:, :, 3:4])
+          torch.ones(img.shape[0], img.shape[1], 3,
+                     device=device) * (1 - img[:, :, 3:4])
     img = img[:, :, :3]
     return img
 
@@ -305,7 +319,7 @@ def plot_attn_clip(attn, threshold_map, inputs, inds, use_wandb, output_path, di
 
     plt.subplot(1, 3, 3)
     threshold_map_ = (threshold_map - threshold_map.min()) / \
-        (threshold_map.max() - threshold_map.min())
+                     (threshold_map.max() - threshold_map.min())
     plt.imshow(threshold_map_, interpolation='nearest', vmin=0, vmax=1)
     plt.title("prob softmax")
     plt.scatter(inds[:, 1], inds[:, 0], s=10, c='red', marker='o')
@@ -372,9 +386,9 @@ def get_mask_u2net(args, pil_im):
     mask = resize(mask, (h, w), anti_aliasing=False)
     mask[mask < 0.5] = 0
     mask[mask >= 0.5] = 1
-    
+
     # predict_np = predict.clone().cpu().data.numpy()
-    im = Image.fromarray((mask[:, :, 0]*255).astype(np.uint8)).convert('RGB')
+    im = Image.fromarray((mask[:, :, 0] * 255).astype(np.uint8)).convert('RGB')
     im.save(f"{args.output_dir}/mask.png")
 
     im_np = np.array(pil_im)
