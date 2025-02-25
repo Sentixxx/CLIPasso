@@ -1,161 +1,144 @@
-import sys
-import warnings
-
-warnings.filterwarnings('ignore')
-warnings.simplefilter('ignore')
-
 import argparse
-import multiprocessing as mp
 import os
-import subprocess as sp
-from shutil import copyfile
+import random
 
 import numpy as np
+import pydiffvg
 import torch
-from IPython.display import Image as Image_colab
-from IPython.display import display, SVG, clear_output
-from ipywidgets import IntSlider, Output, IntProgress, Button
-import time
-
-parser = argparse.ArgumentParser()
-parser.add_argument("--target_file", type=str,
-                    help="target image file, located in <target_images>")
-parser.add_argument("--num_strokes", type=int, default=16,
-                    help="number of strokes used to generate the sketch, this defines the level of abstraction.")
-parser.add_argument("--num_iter", type=int, default=2001,
-                    help="number of iterations")
-parser.add_argument("--fix_scale", type=int, default=0,
-                    help="if the target image is not squared, it is recommended to fix the scale")
-parser.add_argument("--mask_object", type=int, default=0,
-                    help="if the target image contains background, it's better to mask it out")
-parser.add_argument("--num_sketches", type=int, default=3,
-                    help="it is recommended to draw 3 sketches and automatically chose the best one")
-parser.add_argument("--multiprocess", type=int, default=0,
-                    help="recommended to use multiprocess if your computer has enough memory")
-parser.add_argument('-colab', action='store_true')
-parser.add_argument('-cpu', action='store_true')
-parser.add_argument('-display', action='store_true')
-parser.add_argument('--gpunum', type=int, default=0)
-
-args = parser.parse_args()
-
-multiprocess = not args.colab and args.num_sketches > 1 and args.multiprocess
-
-abs_path = os.path.abspath(os.getcwd())
-
-target = f"{abs_path}/target_images/{args.target_file}"
-assert os.path.isfile(target), f"{target} does not exists!"
-
-if not os.path.isfile(f"{abs_path}/U2Net_/saved_models/u2net.pth"):
-    sp.run(["gdown", "https://drive.google.com/uc?id=1ao1ovG1Qtx4b7EoskHXmi2E9rp5CHLcZ",
-            "-O", "U2Net_/saved_models/"])
-
-test_name = os.path.splitext(args.target_file)[0]
-output_dir = f"{abs_path}/output_sketches/{test_name}/"
-if not os.path.exists(output_dir):
-    os.makedirs(output_dir)
-
-num_iter = args.num_iter
-save_interval = 10
-use_gpu = not args.cpu
-
-if not torch.cuda.is_available():
-    use_gpu = False
-    print("CUDA is not configured with GPU, running with CPU instead.")
-    print("Note that this will be very slow, it is recommended to use colab.")
-
-# 结果显示
-if args.colab:
-    print("=" * 50)
-    print(f"Processing [{args.target_file}] ...")
-    if args.colab or args.display:
-        img_ = Image_colab(target)
-        display(img_)
-        print(f"GPU: {use_gpu}, {torch.cuda.current_device()}")
-    print(f"Results will be saved to \n[{output_dir}] ...")
-    print("=" * 50)
-
-seeds = list(range(0, args.num_sketches * 1000, 1000))
-
-exit_codes = []
-manager = mp.Manager()
-losses_all = manager.dict()
+import wandb
 
 
-def run(seed, wandb_name):
-    exit_code = sp.run(["python", "painterly_rendering_new.py", target,
-                        "--num_paths", str(args.num_strokes),
-                        "--output_dir", output_dir,
-                        "--wandb_name", wandb_name,
-                        "--num_iter", str(num_iter),
-                        "--save_interval", str(save_interval),
-                        "--seed", str(seed),
-                        "--use_gpu", str(int(use_gpu)),
-                        "--fix_scale", str(args.fix_scale),
-                        "--mask_object", str(args.mask_object),
-                        "--mask_object_attention", str(
-            args.mask_object),
-                        "--display_logs", str(int(args.colab)),
-                        "--display", str(int(args.display))])
-    if exit_code.returncode:
-        sys.exit(1)
-
-    config = np.load(f"{output_dir}/{wandb_name}/config.npy",
-                     allow_pickle=True)[()]
-    # 提取损失评估数据
-    loss_eval = np.array(config['loss_eval'])
-    inds = np.argsort(loss_eval)
-    losses_all[wandb_name] = loss_eval[inds][0]
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
 
-# 展示图片
-def display_(seed, wandb_name):
-    path_to_svg = f"{output_dir}/{wandb_name}/svg_logs/"
-    intervals_ = list(range(0, num_iter, save_interval))
-    filename = f"svg_iter0.svg"
-    # 显示滑块和输出框
-    display(IntSlider())
-    out = Output()
-    display(out)
-    for i in intervals_:
-        filename = f"svg_iter{i}.svg"
-        not_exist = True
-        while not_exist:
-            not_exist = not os.path.isfile(f"{path_to_svg}/{filename}")
-            continue
-        with out:
-            clear_output()
-            print("")
-            display(IntProgress(
-                value=i,
-                min=0,
-                max=num_iter,
-                description='Processing:',
-                bar_style='info',  # 'success', 'info', 'warning', 'danger' or ''
-                style={'bar_color': 'maroon'},
-                orientation='horizontal'
-            ))
-            display(SVG(f"{path_to_svg}/svg_iter{i}.svg"))
+def parse_arguments():
+    parser = argparse.ArgumentParser()
+    # =================================
+    # ============ general ============
+    # =================================
+    parser.add_argument("target", help="target image path")
+    parser.add_argument("--output_dir", type=str,
+                        help="directory to save the output images and loss")
+    parser.add_argument("--path_svg", type=str, default="none",
+                        help="if you want to load an svg file and train from it")
+    parser.add_argument("--use_gpu", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--mask_object", type=int, default=0)
+    parser.add_argument("--fix_scale", type=int, default=0)
+    parser.add_argument("--display_logs", type=int, default=0)
+    parser.add_argument("--display", type=int, default=0)
 
+    # =================================
+    # ============ wandb ============
+    # =================================
+    parser.add_argument("--use_wandb", type=int, default=0)
+    parser.add_argument("--wandb_user", type=str, default="yael-vinker")
+    parser.add_argument("--wandb_name", type=str, default="test")
+    parser.add_argument("--wandb_project_name", type=str, default="none")
 
-if multiprocess:
-    ncpus = 10
-    P = mp.Pool(ncpus)  # Generate pool of workers
-# 创建文件夹，遍历seed，运行run
-for seed in seeds:
-    wandb_name = f"{test_name}_{args.num_strokes}strokes_seed{seed}"
-    if multiprocess:
-        P.apply_async(run, (seed, wandb_name))
+    # =================================
+    # =========== training ============
+    # =================================
+    parser.add_argument("--num_iter", type=int, default=500,
+                        help="number of optimization iterations")
+    parser.add_argument("--num_stages", type=int, default=1,
+                        help="training stages, you can train x strokes, then freeze them and train another x strokes etc.")
+    parser.add_argument("--lr_scheduler", type=int, default=0)
+    parser.add_argument("--lr", type=float, default=1)
+    parser.add_argument("--color_lr", type=float, default=0.01)
+    parser.add_argument("--color_vars_threshold", type=float, default=0.0)
+    parser.add_argument("--batch_size", type=int, default=1,
+                        help="for optimization it's only one image")
+    parser.add_argument("--save_interval", type=int, default=10)
+    parser.add_argument("--eval_interval", type=int, default=10)
+    parser.add_argument("--image_scale", type=int, default=224)
+
+    # =================================
+    # ======== strokes params =========
+    # =================================
+    parser.add_argument("--num_paths", type=int,
+                        default=16, help="number of strokes")
+    parser.add_argument("--width", type=float,
+                        default=1.5, help="stroke width")
+    parser.add_argument("--control_points_per_seg", type=int, default=4)
+    parser.add_argument("--num_segments", type=int, default=1,
+                        help="number of segments for each stroke, each stroke is a bezier curve with 4 control points")
+    parser.add_argument("--attention_init", type=int, default=1,
+                        help="if True, use the attention heads of Dino model to set the location of the initial strokes")
+    parser.add_argument("--saliency_model", type=str, default="clip")
+    parser.add_argument("--saliency_clip_model", type=str, default="ViT-B/32")
+    parser.add_argument("--xdog_intersec", type=int, default=1)
+    parser.add_argument("--mask_object_attention", type=int, default=0)
+    parser.add_argument("--softmax_temp", type=float, default=0.3)
+
+    # =================================
+    # ============= loss ==============
+    # =================================
+    parser.add_argument("--percep_loss", type=str, default="none",
+                        help="the type of perceptual loss to be used (L2/LPIPS/none)")
+    parser.add_argument("--perceptual_weight", type=float, default=0,
+                        help="weight the perceptual loss")
+    parser.add_argument("--train_with_clip", type=int, default=0)
+    parser.add_argument("--clip_weight", type=float, default=0)
+    parser.add_argument("--start_clip", type=int, default=0)
+    parser.add_argument("--num_aug_clip", type=int, default=4)
+    parser.add_argument("--include_target_in_aug", type=int, default=0)
+    parser.add_argument("--augment_both", type=int, default=1,
+                        help="if you want to apply the affine augmentation to both the sketch and image")
+    parser.add_argument("--augemntations", type=str, default="affine",
+                        help="can be any combination of: 'affine_noise_eraserchunks_eraser_press'")
+    parser.add_argument("--noise_thresh", type=float, default=0.5)
+    parser.add_argument("--aug_scale_min", type=float, default=0.7)
+    parser.add_argument("--force_sparse", type=float, default=0,
+                        help="if True, use L1 regularization on stroke's opacity to encourage small number of strokes")
+    parser.add_argument("--clip_conv_loss", type=float, default=1)
+    parser.add_argument("--clip_conv_loss_type", type=str, default="L2")
+    parser.add_argument("--clip_conv_layer_weights",
+                        type=str, default="0,0,1.0,1.0,0")
+    parser.add_argument("--clip_model_name", type=str, default="RN101")
+    parser.add_argument("--clip_fc_loss_weight", type=float, default=0.1)
+    parser.add_argument("--clip_text_guide", type=float, default=0)
+    parser.add_argument("--text_target", type=str, default="none")
+
+    args = parser.parse_args()
+    set_seed(args.seed)
+
+    args.clip_conv_layer_weights = [
+        float(item) for item in args.clip_conv_layer_weights.split(',')]
+
+    args.output_dir = os.path.join(args.output_dir, args.wandb_name)
+    if not os.path.exists(args.output_dir):
+        os.mkdir(args.output_dir)
+
+    jpg_logs_dir = f"{args.output_dir}/jpg_logs"
+    svg_logs_dir = f"{args.output_dir}/svg_logs"
+    if not os.path.exists(jpg_logs_dir):
+        os.mkdir(jpg_logs_dir)
+    if not os.path.exists(svg_logs_dir):
+        os.mkdir(svg_logs_dir)
+
+    if args.use_wandb:
+        wandb.init(project=args.wandb_project_name, entity=args.wandb_user,
+                   config=args, name=args.wandb_name, id=wandb.util.generate_id())
+
+    if args.use_gpu:
+        args.device = torch.device("cuda" if (
+            torch.cuda.is_available() and torch.cuda.device_count() > 0) else "cpu")
     else:
-        run(seed, wandb_name)
+        args.device = torch.device("cpu")
+    pydiffvg.set_use_gpu(torch.cuda.is_available() and args.use_gpu)
+    pydiffvg.set_device(args.device)
+    return args
 
-if args.display:
-    time.sleep(10)
-    P.apply_async(display_, (0, f"{test_name}_{args.num_strokes}strokes_seed0"))
 
-if multiprocess:
-    P.close()
-    P.join()  # start processes
-sorted_final = dict(sorted(losses_all.items(), key=lambda item: item[1]))
-copyfile(f"{output_dir}/{list(sorted_final.keys())[0]}/best_iter.svg",
-         f"{output_dir}/{list(sorted_final.keys())[0]}_best.svg")
+if __name__ == "__main__":
+    # for cog predict
+    args = parse_arguments()
+    final_config = vars(args)
+    np.save(f"{args.output_dir}/config_init.npy", final_config)

@@ -34,8 +34,6 @@ class Painter(torch.nn.Module):
         self.noise_thresh = args.noise_thresh
         self.softmax_temp = args.softmax_temp
 
-        self.control_points_set = []
-        self.points_set_groups=[]
         self.shapes = []
         self.shape_groups = []
         self.device = device
@@ -93,11 +91,10 @@ class Painter(torch.nn.Module):
                 stroke_color = torch.tensor([0.0, 0.0, 0.0, 1.0])
                 path = self.get_path()
                 self.shapes.append(path)
-
                 path_group = pydiffvg.ShapeGroup(shape_ids = torch.tensor([len(self.shapes) - 1]),
                                                     fill_color = None,
                                                     stroke_color = stroke_color)
-                self.shape_groups.append(path_group)
+                self.shape_groups.append(path_group)        
             self.optimize_flag = [True for i in range(len(self.shapes))]
         
         img = self.render_warp()
@@ -106,13 +103,11 @@ class Painter(torch.nn.Module):
         # Convert img from HWC to NCHW
         img = img.unsqueeze(0)
         img = img.permute(0, 3, 1, 2).to(self.device) # NHWC -> NCHW
-
         return img
         # utils.imwrite(img.cpu(), '{}/init.png'.format(args.output_dir), gamma=args.gamma, use_wandb=args.use_wandb, wandb_name="init")
 
     def get_image(self):
-        img=self.render_warp()
-        # img = self.render_warp()
+        img = self.render_warp()
         opacity = img[:, :, 3:4]
         img = opacity * img[:, :, :3] + torch.ones(img.shape[0], img.shape[1], 3, device = self.device) * (1 - opacity)
         img = img[:, :, :3]
@@ -134,19 +129,16 @@ class Painter(torch.nn.Module):
                 points.append(p1)
                 p0 = p1
         points = torch.tensor(points).to(self.device)
+
         points[:, 0] *= self.canvas_width
         points[:, 1] *= self.canvas_height
-        self.control_points_set.append(points)
+        
         path = pydiffvg.Path(num_control_points = self.num_control_points,
                                 points = points,
                                 stroke_width = torch.tensor(self.width),
                                 is_closed = False)
         self.strokes_counter += 1
-        # print(path)
         return path
-
-
-
 
     def render_warp(self):
         if self.opacity_optim:
@@ -162,10 +154,9 @@ class Painter(torch.nn.Module):
                 for path in self.shapes:
                     path.points.data.add_(eps * torch.randn_like(path.points))
 
+
         scene_args = pydiffvg.RenderFunction.serialize_scene(\
             self.canvas_width, self.canvas_height, self.shapes, self.shape_groups)
-        # 默认16条bezier曲线，每个曲线2阶4个点
-
         img = _render(self.canvas_width, # width
                     self.canvas_height, # height
                     2,   # num_samples_x
@@ -177,18 +168,17 @@ class Painter(torch.nn.Module):
     
     def parameters(self):
         self.points_vars = []
+
         # storkes' location optimization
         for i, path in enumerate(self.shapes):
             if self.optimize_flag[i]:
                 path.points.requires_grad = True
                 self.points_vars.append(path.points)
-            
         return self.points_vars
     
     def get_points_parans(self):
         return self.points_vars
-
-
+    
     def set_color_parameters(self):
         # for storkes' color optimization (opacity)
         self.color_vars = []
@@ -388,21 +378,16 @@ class Painter(torch.nn.Module):
         else:
             self.add_random_noise = "noise" in self.args.augemntations
 
-
 class PainterOptimizer:
-    def __init__(self, args, renderer=None, model_parameters=None):
+    def __init__(self, args, renderer):
         self.renderer = renderer
         self.points_lr = args.lr
         self.color_lr = args.color_lr
         self.args = args
         self.optim_color = args.force_sparse
-        self.model_parameters = model_parameters if model_parameters is not None else []
 
     def init_optimizers(self):
-        self.points_optim = torch.optim.Adam([
-        {'params': self.renderer.parameters(), 'lr': self.points_lr},
-        {'params': self.model_parameters, 'lr': 0.001}])
-        # self.points_optim = torch.optim.Adam(self.renderer.parameters()+self.model_parameters, lr=self.points_lr)
+        self.points_optim = torch.optim.Adam(self.renderer.parameters(), lr=self.points_lr)
         if self.optim_color:
             self.color_optim = torch.optim.Adam(self.renderer.set_color_parameters(), lr=self.color_lr)
 
@@ -410,17 +395,17 @@ class PainterOptimizer:
         new_lr = utils.get_epoch_lr(counter, self.args)
         for param_group in self.points_optim.param_groups:
             param_group["lr"] = new_lr
-
+    
     def zero_grad_(self):
         self.points_optim.zero_grad()
         if self.optim_color:
             self.color_optim.zero_grad()
-
+    
     def step_(self):
         self.points_optim.step()
         if self.optim_color:
             self.color_optim.step()
-
+    
     def get_lr(self):
         return self.points_optim.param_groups[0]['lr']
 
