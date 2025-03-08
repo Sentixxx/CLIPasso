@@ -16,6 +16,8 @@ from IPython.display import Image as Image_colab
 from IPython.display import display, SVG, clear_output
 from ipywidgets import IntSlider, Output, IntProgress, Button
 import time
+import glob
+from pathlib import Path
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--target_file", type=str,
@@ -36,6 +38,7 @@ parser.add_argument('-colab', action='store_true')
 parser.add_argument('-cpu', action='store_true')
 parser.add_argument('-display', action='store_true')
 parser.add_argument('--gpunum', type=int, default=0)
+parser.add_argument('--eval', action='store_true', help='使用评估模式，从指定目录递归处理图片')
 
 args = parser.parse_args()
 
@@ -43,8 +46,13 @@ multiprocess = not args.colab and args.num_sketches > 1 and args.multiprocess
 
 abs_path = os.path.abspath(os.getcwd())
 
-target = f"{abs_path}/target_images/{args.target_file}"
-assert os.path.isfile(target), f"{target} does not exists!"
+# 只有在非评估模式下才检查目标文件
+if not args.eval:
+    target = f"{abs_path}/target_images/{args.target_file}"
+    assert os.path.isfile(target), f"{target} does not exists!"
+else:
+    # 评估模式下设置一个默认值，实际不会使用
+    target = ""
 
 if not os.path.isfile(f"{abs_path}/U2Net_/saved_models/u2net.pth"):
     sp.run(["gdown", "https://drive.google.com/uc?id=1ao1ovG1Qtx4b7EoskHXmi2E9rp5CHLcZ",
@@ -77,10 +85,105 @@ if args.colab:
 
 seeds = list(range(0, args.num_sketches * 1000, 1000))
 
-exit_codes = []
-manager = mp.Manager()
-losses_all = manager.dict()
-
+def run_eval(seed, wandb_name):
+    # 定义源目录和目标目录
+    source_dir = "D:\\BaiduNetdiskDownload\\data\\Object\\GT\\val\\5"
+    eval_dir = os.path.join(abs_path, "eval")
+    best_dir = os.path.join(abs_path, "best")
+    # 确保输出目录存在
+    if not os.path.exists(eval_dir):
+        os.makedirs(eval_dir)
+    
+    # 递归搜索所有图片文件
+    image_extensions = ['*.jpg', '*.jpeg', '*.png', '*.bmp']
+    image_files = []
+    for ext in image_extensions:
+        image_files.extend(glob.glob(os.path.join(source_dir, '**', ext), recursive=True))
+    
+    # 处理每一个图片文件
+    for img_path in image_files:
+        # 保持原目录结构
+        rel_path = os.path.relpath(img_path, source_dir)
+        output_dirname = os.path.dirname(rel_path)
+        img_basename = os.path.basename(img_path)
+        img_name_without_ext = os.path.splitext(img_basename)[0]
+        
+    
+        # 创建对应的输出目录
+        current_output_dir = os.path.join(eval_dir, output_dirname)
+        result_dir = os.path.join(best_dir, output_dirname)
+        if not os.path.exists(current_output_dir):
+            os.makedirs(current_output_dir, exist_ok=True)
+        
+        # 当前图片的wandb名称
+        current_wandb_name = f"{img_name_without_ext}_{args.num_strokes}strokes_seed{seed}"
+        
+        print(f"处理图片: {img_path}")
+        print(f"输出到: {current_output_dir}")
+        
+        if not os.path.exists(best_dir):
+            os.makedirs(best_dir)
+        
+        # 执行模型
+        exit_code = sp.run(["python", "painterly_rendering_new.py", img_path,
+                            "--num_paths", str(args.num_strokes),
+                            "--output_dir", current_output_dir,
+                            "--wandb_name", current_wandb_name,
+                            "--num_iter", str(num_iter),
+                            "--save_interval", str(save_interval),
+                            "--seed", str(seed),
+                            "--use_gpu", str(int(use_gpu)),
+                            "--fix_scale", str(args.fix_scale),
+                            "--mask_object", str(args.mask_object),
+                            "--mask_object_attention", str(args.mask_object),
+                            "--display_logs", str(int(args.colab)),
+                            "--display", str(int(args.display))])
+        
+        if exit_code.returncode:
+            print(f"处理图片 {img_path} 时出错")
+            continue
+        
+        try:
+            # 加载配置并获取损失评估数据
+            config_path = os.path.join(current_output_dir, current_wandb_name, "config.npy")
+            if os.path.exists(config_path):
+                config = np.load(config_path, allow_pickle=True)[()]
+                loss_eval = np.array(config['loss_eval'])
+                inds = np.argsort(loss_eval)
+                losses_all[current_wandb_name] = loss_eval[inds][0]
+                
+                # 复制最佳结果到当前输出目录
+                # src_svg = os.path.join(current_output_dir, current_wandb_name, "best_iter.svg")
+                src_png = os.path.join(current_output_dir, current_wandb_name, "best_iter.jpg")
+                # dst_svg = os.path.join(result_dir, f"{current_wandb_name}_best.svg")
+                dst_png = os.path.join(result_dir, f"{current_wandb_name}_best.jpg")
+                # if os.path.exists(src_svg):
+                #     copyfile(src_svg, dst_svg)
+                if os.path.exists(src_png):
+                    copyfile(src_png, dst_png)
+        # 清理output_dir内的内容
+            try:
+                # 保留best_iter.svg和config.npy,删除其他文件
+                svg_logs_dir = os.path.join(current_output_dir, current_wandb_name, "svg_logs")
+                if os.path.exists(svg_logs_dir):
+                    for file in os.listdir(svg_logs_dir):
+                        file_path = os.path.join(svg_logs_dir, file)
+                        if os.path.isfile(file_path):
+                            os.remove(file_path)
+                    os.rmdir(svg_logs_dir)
+                    
+                # 删除其他临时文件
+                temp_files = ["loss.npy", "paths.npy", "points.npy", "strokes.npy"]
+                for temp_file in temp_files:
+                    temp_path = os.path.join(current_output_dir, current_wandb_name, temp_file)
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+                        
+                print(f"已清理 {current_output_dir} 内的临时文件")
+            except Exception as e:
+                print(f"清理文件时出错: {e}")
+        except Exception as e:
+            print(f"处理配置文件时出错: {e}")
 
 def run(seed, wandb_name):
     exit_code = sp.run(["python", "painterly_rendering_new.py", target,
@@ -136,26 +239,51 @@ def display_(seed, wandb_name):
                     ))
             display(SVG(f"{path_to_svg}/svg_iter{i}.svg"))
 
+if __name__ == "__main__":
+    # 添加freeze_support以解决Windows下的多进程问题
+    mp.freeze_support()
     
+    # 初始化全局变量
+    exit_codes = []
     
-if multiprocess:
-    ncpus = 10
-    P = mp.Pool(ncpus)  # Generate pool of workers
-#创建文件夹，遍历seed，运行run
-for seed in seeds:
-    wandb_name = f"{test_name}_{args.num_strokes}strokes_seed{seed}"
-    if multiprocess:
-        P.apply_async(run, (seed, wandb_name))
+    # 在评估模式下，直接运行run_eval而不使用Manager
+    if args.eval:
+        # 评估模式：使用单个seed直接调用run_eval
+        print("启动评估模式，从指定目录递归处理图片...")
+        losses_all = {}  # 在评估模式下使用普通字典
+        seed = seeds[0]  # 只使用第一个seed
+        wandb_name = f"{test_name}_{args.num_strokes}strokes_seed{seed}"
+        run_eval(seed, wandb_name)
     else:
-        run(seed, wandb_name)
-
-if args.display:
-    time.sleep(10)
-    P.apply_async(display_, (0, f"{test_name}_{args.num_strokes}strokes_seed0"))
-
-if multiprocess:
-    P.close()
-    P.join()  # start processes
-sorted_final = dict(sorted(losses_all.items(), key=lambda item: item[1]))
-copyfile(f"{output_dir}/{list(sorted_final.keys())[0]}/best_iter.svg",
-         f"{output_dir}/{list(sorted_final.keys())[0]}_best.svg")
+        # 正常模式：创建共享对象
+        manager = mp.Manager()
+        losses_all = manager.dict()
+        
+        # 正常模式：创建多进程并运行
+        if multiprocess:
+            ncpus = 10
+            P = mp.Pool(ncpus)  # Generate pool of workers
+            
+        # 正常模式：创建文件夹，遍历seed，运行run
+        for seed in seeds:
+            wandb_name = f"{test_name}_{args.num_strokes}strokes_seed{seed}"
+            if multiprocess:
+                P.apply_async(run, (seed, wandb_name))
+            else:
+                run(seed, wandb_name)
+    
+        if args.display:
+            time.sleep(10)
+            if multiprocess:
+                P.apply_async(display_, (0, f"{test_name}_{args.num_strokes}strokes_seed0"))
+            else:
+                display_(0, f"{test_name}_{args.num_strokes}strokes_seed0")
+    
+        if multiprocess:
+            P.close()
+            P.join()  # start processes
+            
+        sorted_final = dict(sorted(losses_all.items(), key=lambda item: item[1]))
+        if sorted_final:  # 确保字典不为空
+            copyfile(f"{output_dir}/{list(sorted_final.keys())[0]}/best_iter.svg",
+                    f"{output_dir}/{list(sorted_final.keys())[0]}_best.svg")

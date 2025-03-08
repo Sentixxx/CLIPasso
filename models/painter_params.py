@@ -203,7 +203,6 @@ class Painter(torch.nn.Module):
     def save_svg(self, output_dir, name,paths,shape_groups):
         pydiffvg.save_svg('{}/{}.svg'.format(output_dir, name), self.canvas_width, self.canvas_height, paths, shape_groups)
 
-
     def dino_attn(self):
         patch_size=8 # dino hyperparameter
         threshold=0.6

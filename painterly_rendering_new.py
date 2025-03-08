@@ -202,7 +202,7 @@ def main(args):
             renderer.save_svg(
                 f"{args.output_dir}/svg_logs", f"svg_iter{epoch}",paths,shape_groups)
         if epoch % args.eval_interval == 0:
-
+            with torch.no_grad():
                 losses_dict_eval = loss_func(sketches, inputs, renderer.get_color_parameters(
                 ), renderer.get_points_parans(), counter, optimizer, mode="eval")
                 loss_eval = sum(list(losses_dict_eval.values()))
