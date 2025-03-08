@@ -1,5 +1,4 @@
 import warnings
-
 warnings.filterwarnings('ignore')
 warnings.simplefilter('ignore')
 
@@ -29,8 +28,6 @@ from IPython.display import display, SVG
 import model_rnngcn
 from torch.utils.tensorboard import SummaryWriter
 from data_utils import compute_cosine_similarity
-
-
 def load_renderer(args, target_im=None, mask=None):
     renderer = Painter(num_strokes=args.num_paths, args=args,
                        num_segments=args.num_segments,
@@ -71,8 +68,7 @@ def get_target(args):
     target_ = data_transforms(target).unsqueeze(0).to(args.device)
     return target_, mask
 
-
-# 计算余弦相似度
+#计算余弦相似度
 
 
 def print_model_parameters(model):
@@ -95,7 +91,8 @@ def init_writer():
         os.makedirs(path, exist_ok=True)
 
     writer = SummaryWriter(runs_dir)
-    return writer, runs_dir, save_path, img_dir
+    return writer, runs_dir, save_path,img_dir
+
 
 
 def main(args):
@@ -105,12 +102,12 @@ def main(args):
     utils.log_input(args.use_wandb, 0, inputs, args.output_dir)
     renderer = load_renderer(args, inputs, mask)
 
-    writer, runs_dir, save_path, img_dir = init_writer()
-    # 创建模型
-    shared_fc = model_rnngcn.SharedLinear(16 * 128, 16 * 8)
+    writer, runs_dir, save_path ,img_dir= init_writer()
+    #创建模型
+    shared_fc = model_rnngcn.SharedLinear(16*128, 16 * 8)
     cnnModel = model_rnngcn.SimpleCNN(shared_fc=shared_fc).to(args.device)
-    GCNmodel = model_rnngcn.GCN(input_dim=128, output_dim=4, shared_fc=shared_fc).to(args.device)  # 4 是每条bezier曲线控制点的数量
-    optimizer = PainterOptimizer(args, list(cnnModel.parameters()), list(GCNmodel.parameters()), renderer)
+    GCNmodel = model_rnngcn.GCN(input_dim=128, output_dim=4,shared_fc=shared_fc).to(args.device)  # 4 是每条bezier曲线控制点的数量
+    optimizer = PainterOptimizer(args, list(cnnModel.parameters()),list(GCNmodel.parameters()), renderer)
 
     # 初始化训练
     renderer.set_random_noise(0)
@@ -131,6 +128,8 @@ def main(args):
     else:
         epoch_range = tqdm(range(args.num_iter))
 
+
+
     for epoch in epoch_range:
 
         if not args.display:
@@ -144,54 +143,52 @@ def main(args):
         # 获取控制点
         for i, path in enumerate(renderer.shapes):
             renderer.control_points_set[i] = path.points
-        points_rare = torch.stack(renderer.control_points_set, dim=0)
-        points_rare = points_rare.clone().detach()
+        points_rare=torch.stack(renderer.control_points_set,dim=0)
+        points_rare=points_rare.clone().detach()
         # print(points_rare.shape)
         # 生成掩码图像
         bezier_renderer = BezierRenderer(224, 224)
-        bezier_masked, img_rare = bezier_renderer.mask_img(renderer.control_points_set)
-
-        # 绘制mask
+        bezier_masked,img_rare = bezier_renderer.mask_img(renderer.control_points_set)
+        
+        #绘制mask
         img_masked = bezier_masked.permute(1, 0, 2, 3)
         img_masked_grad = torchvision.utils.make_grid(img_masked, nrow=8, padding=2)
 
         # 特征提取cnn
-        feature, new_points_test = cnnModel(bezier_masked)
-        feature = feature.view(-1, 128)
+        feature,new_points_test = cnnModel(bezier_masked)
+        feature=feature.view(-1,128)
 
-        # 余弦相似度
+        #余弦相似度
         reg_matrix, cos_matrix = compute_cosine_similarity(feature)
 
-        # 计算mseloss之new_points_test
-        new_points_test = (new_points_test * 224).view(16, -1, 2)
+        #计算mseloss之new_points_test
+        new_points_test = (new_points_test*224).view(16, -1, 2)
         # new_points_test = new_points_test.view(16, -1, 2)
-        # 绘制new_points_test
+        #绘制new_points_test
         draw_new_points = bezier_renderer.render_img_raw(new_points_test)
 
-        # gcn
+        #gcn
         new_points = GCNmodel(feature, reg_matrix).view(-1, 4, 2)
 
-        # 绘制new_points中的单个bezier曲线
-        new_points_grid = bezier_renderer.render_beziers(new_points * 224)
+        #绘制new_points中的单个bezier曲线
+        new_points_grid = bezier_renderer.render_beziers(new_points*224)
         new_points_grid = new_points_grid.permute(0, 3, 1, 2)
         new_points_grid = torchvision.utils.make_grid(new_points_grid, nrow=8, padding=2)
 
-        # sketch绘制
-        sketches = utils.render_img_rgb_from_renderer(new_points, renderer, epoch, img_dir).to(args.device)
-
-        Mseloss = mseloss(new_points_test, points_rare)
-        # writer.add_image(f"{epoch}_sketch", sketches_new)
-        losses_dict = loss_func(sketches, inputs.detach(), renderer.get_color_parameters(), renderer, counter,
-                                optimizer)
+        #sketch绘制
+        sketches,paths,shape_groups = utils.render_img_rgb_from_renderer(new_points, renderer,epoch,img_dir)
+        sketches = sketches.to(args.device)
+        Mseloss=mseloss(new_points_test,points_rare)
+        losses_dict = loss_func(sketches, inputs.detach(), renderer.get_color_parameters(), renderer, counter, optimizer)
         if epoch <= 100:
-            loss = Mseloss
+            loss=Mseloss
         else:
-            cliploss = sum(list(losses_dict.values()))
-            loss = cliploss + Mseloss * 0.01
+            cliploss=sum(list(losses_dict.values()))
+            loss = cliploss+Mseloss*0.01
         loss.backward()
         optimizer.step_()
-        max_grad_norm = 1.0
-        torch.nn.utils.clip_grad_norm_(cnnModel.parameters(), max_grad_norm)
+        max_grad_norm=1.0
+        torch.nn.utils.clip_grad_norm_(cnnModel.parameters(),max_grad_norm)
         if epoch % args.save_interval == 0:
             # 打印网格的形状,chw
             utils.save_cosine_similarity_heatmap(cos_matrix, save_path, epoch, "cos_matrix")
@@ -203,10 +200,9 @@ def main(args):
             utils.plot_batch(inputs, sketches, f"{args.output_dir}/jpg_logs", counter,
                              use_wandb=args.use_wandb, title=f"iter{epoch}.jpg")
             renderer.save_svg(
-                f"{args.output_dir}/svg_logs", f"svg_iter{epoch}")
+                f"{args.output_dir}/svg_logs", f"svg_iter{epoch}",paths,shape_groups)
         if epoch % args.eval_interval == 0:
 
-            with torch.no_grad():
                 losses_dict_eval = loss_func(sketches, inputs, renderer.get_color_parameters(
                 ), renderer.get_points_parans(), counter, optimizer, mode="eval")
                 loss_eval = sum(list(losses_dict_eval.values()))
@@ -238,6 +234,8 @@ def main(args):
                     writer.add_scalar("mseloss.", Mseloss.item(), global_step=epoch)
                     writer.add_scalar("cliploss.", cliploss.item(), global_step=epoch)
 
+
+
                 cur_delta = loss_eval.item() - best_loss
                 if abs(cur_delta) > min_delta:
                     if cur_delta < 0:
@@ -246,7 +244,7 @@ def main(args):
                         terminate = False
                         utils.plot_batch(
                             inputs, sketches, args.output_dir, counter, use_wandb=args.use_wandb, title="best_iter.jpg")
-                        renderer.save_svg(args.output_dir, "best_iter")
+                        renderer.save_svg(args.output_dir, "best_iter",paths,shape_groups)
 
                 if args.use_wandb:
                     wandb.run.summary["best_loss"] = best_loss
@@ -276,12 +274,13 @@ def main(args):
 
     counter += 1
 
-    renderer.save_svg(args.output_dir, "final_svg")
+    renderer.save_svg(args.output_dir, "final_svg",paths,shape_groups)
     path_svg = os.path.join(args.output_dir, "best_iter.svg")
     utils.log_sketch_summary_final(
         path_svg, args.use_wandb, args.device, best_iter, best_loss, "best total")
 
     return configs_to_save
+
 
 
 if __name__ == "__main__":
