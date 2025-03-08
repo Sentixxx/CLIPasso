@@ -142,7 +142,6 @@ class Painter(torch.nn.Module):
                                 stroke_width = torch.tensor(self.width),
                                 is_closed = False)
         self.strokes_counter += 1
-        # print(path)
         return path
 
 
@@ -201,8 +200,8 @@ class Painter(torch.nn.Module):
     def get_color_parameters(self):
         return self.color_vars
         
-    def save_svg(self, output_dir, name):
-        pydiffvg.save_svg('{}/{}.svg'.format(output_dir, name), self.canvas_width, self.canvas_height, self.shapes, self.shape_groups)
+    def save_svg(self, output_dir, name,paths,shape_groups):
+        pydiffvg.save_svg('{}/{}.svg'.format(output_dir, name), self.canvas_width, self.canvas_height, paths, shape_groups)
 
 
     def dino_attn(self):
