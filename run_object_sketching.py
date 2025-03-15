@@ -18,6 +18,7 @@ from ipywidgets import IntSlider, Output, IntProgress, Button
 import time
 import glob
 from pathlib import Path
+import cv2
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--target_file", type=str,
@@ -51,7 +52,6 @@ if not args.eval:
     target = f"{abs_path}/target_images/{args.target_file}"
     assert os.path.isfile(target), f"{target} does not exists!"
 else:
-    # 评估模式下设置一个默认值，实际不会使用
     target = ""
 
 if not os.path.isfile(f"{abs_path}/U2Net_/saved_models/u2net.pth"):
@@ -83,53 +83,72 @@ if args.colab:
     print(f"Results will be saved to \n[{output_dir}] ...")
     print("=" * 50)
 
-seeds = list(range(0, args.num_sketches * 1000, 1000))
+# seeds = list(range(0, args.num_sketches * 1000, 1000))
+
+seeds = [0]
 
 def run_eval(seed, wandb_name):
-    # 定义源目录和目标目录
-    source_dir = "D:\\BaiduNetdiskDownload\\data\\Object\\GT\\val\\5"
+    source_dir = "" 
+    if source_dir == "":
+        print("请输入评估图片的目录!")
+        return
     eval_dir = os.path.join(abs_path, "eval")
     best_dir = os.path.join(abs_path, "best")
-    # 确保输出目录存在
     if not os.path.exists(eval_dir):
         os.makedirs(eval_dir)
     
-    # 递归搜索所有图片文件
     image_extensions = ['*.jpg', '*.jpeg', '*.png', '*.bmp']
     image_files = []
     for ext in image_extensions:
         image_files.extend(glob.glob(os.path.join(source_dir, '**', ext), recursive=True))
     
-    # 处理每一个图片文件
     for img_path in image_files:
-        # 保持原目录结构
         rel_path = os.path.relpath(img_path, source_dir)
         output_dirname = os.path.dirname(rel_path)
         img_basename = os.path.basename(img_path)
         img_name_without_ext = os.path.splitext(img_basename)[0]
         
-    
-        # 创建对应的输出目录
         current_output_dir = os.path.join(eval_dir, output_dirname)
         result_dir = os.path.join(best_dir, output_dirname)
         if not os.path.exists(current_output_dir):
             os.makedirs(current_output_dir, exist_ok=True)
         
-        # 当前图片的wandb名称
+        target_size = (224, 224)
+        img = cv2.imread(img_path)
+        if img is None:
+            print(f"无法读取图片: {img_path}，跳过")
+            continue
+            
+        h, w = img.shape[:2]
+        ratio = min(target_size[0] / w, target_size[1] / h)
+        new_size = (int(w * ratio), int(h * ratio))
+        img = cv2.resize(img, new_size, interpolation=cv2.INTER_AREA)
+        h, w = img.shape[:2]
+            
+        canvas = np.ones((target_size[1], target_size[0], 3), dtype=np.uint8) * 255
+        
+        x_offset = (target_size[0] - w) // 2
+        y_offset = (target_size[1] - h) // 2
+        
+        canvas[y_offset:y_offset+h, x_offset:x_offset+w] = img
+        
+        temp_img_path = os.path.join(current_output_dir, f"temp_{img_basename}")
+        cv2.imwrite(temp_img_path, canvas)
+        
         current_wandb_name = f"{img_name_without_ext}_{args.num_strokes}strokes_seed{seed}"
         
         print(f"处理图片: {img_path}")
+        print(f"规范化尺寸后保存到: {temp_img_path}")
         print(f"输出到: {current_output_dir}")
         
         if not os.path.exists(best_dir):
             os.makedirs(best_dir)
         
-        # 执行模型
-        exit_code = sp.run(["python", "painterly_rendering_new.py", img_path,
+        exit_code = sp.run(["python", "painterly_rendering_new.py", temp_img_path,
                             "--num_paths", str(args.num_strokes),
                             "--output_dir", current_output_dir,
                             "--wandb_name", current_wandb_name,
-                            "--num_iter", str(num_iter),
+                            "--num_iter", "1001",
                             "--save_interval", str(save_interval),
                             "--seed", str(seed),
                             "--use_gpu", str(int(use_gpu)),
@@ -144,7 +163,6 @@ def run_eval(seed, wandb_name):
             continue
         
         try:
-            # 加载配置并获取损失评估数据
             config_path = os.path.join(current_output_dir, current_wandb_name, "config.npy")
             if os.path.exists(config_path):
                 config = np.load(config_path, allow_pickle=True)[()]
@@ -152,18 +170,15 @@ def run_eval(seed, wandb_name):
                 inds = np.argsort(loss_eval)
                 losses_all[current_wandb_name] = loss_eval[inds][0]
                 
-                # 复制最佳结果到当前输出目录
-                # src_svg = os.path.join(current_output_dir, current_wandb_name, "best_iter.svg")
-                src_png = os.path.join(current_output_dir, current_wandb_name, "best_iter.jpg")
-                # dst_svg = os.path.join(result_dir, f"{current_wandb_name}_best.svg")
-                dst_png = os.path.join(result_dir, f"{current_wandb_name}_best.jpg")
-                # if os.path.exists(src_svg):
-                #     copyfile(src_svg, dst_svg)
-                if os.path.exists(src_png):
-                    copyfile(src_png, dst_png)
-        # 清理output_dir内的内容
+                src_svg = os.path.join(current_output_dir, current_wandb_name, "best_iter.svg")
+                # src_png = os.path.join(current_output_dir, current_wandb_name, "best_iter.jpg")
+                dst_svg = os.path.join(result_dir, f"{current_wandb_name}_best.svg")
+                # dst_png = os.path.join(result_dir, f"{current_wandb_name}_best.jpg")
+                if os.path.exists(src_svg):
+                    copyfile(src_svg, dst_svg)
+                # if os.path.exists(src_png):
+                    # copyfile(src_png, dst_png)
             try:
-                # 保留best_iter.svg和config.npy,删除其他文件
                 svg_logs_dir = os.path.join(current_output_dir, current_wandb_name, "svg_logs")
                 if os.path.exists(svg_logs_dir):
                     for file in os.listdir(svg_logs_dir):
@@ -172,7 +187,6 @@ def run_eval(seed, wandb_name):
                             os.remove(file_path)
                     os.rmdir(svg_logs_dir)
                     
-                # 删除其他临时文件
                 temp_files = ["loss.npy", "paths.npy", "points.npy", "strokes.npy"]
                 for temp_file in temp_files:
                     temp_path = os.path.join(current_output_dir, current_wandb_name, temp_file)
@@ -186,6 +200,7 @@ def run_eval(seed, wandb_name):
             print(f"处理配置文件时出错: {e}")
 
 def run(seed, wandb_name):
+    print(target)
     exit_code = sp.run(["python", "painterly_rendering_new.py", target,
                             "--num_paths", str(args.num_strokes),
                             "--output_dir", output_dir,
@@ -240,31 +255,25 @@ def display_(seed, wandb_name):
             display(SVG(f"{path_to_svg}/svg_iter{i}.svg"))
 
 if __name__ == "__main__":
-    # 添加freeze_support以解决Windows下的多进程问题
     mp.freeze_support()
     
-    # 初始化全局变量
     exit_codes = []
     
-    # 在评估模式下，直接运行run_eval而不使用Manager
     if args.eval:
         # 评估模式：使用单个seed直接调用run_eval
         print("启动评估模式，从指定目录递归处理图片...")
-        losses_all = {}  # 在评估模式下使用普通字典
-        seed = seeds[0]  # 只使用第一个seed
+        losses_all = {}
+        seed = seeds[0]
         wandb_name = f"{test_name}_{args.num_strokes}strokes_seed{seed}"
         run_eval(seed, wandb_name)
     else:
-        # 正常模式：创建共享对象
         manager = mp.Manager()
         losses_all = manager.dict()
         
-        # 正常模式：创建多进程并运行
         if multiprocess:
             ncpus = 10
             P = mp.Pool(ncpus)  # Generate pool of workers
             
-        # 正常模式：创建文件夹，遍历seed，运行run
         for seed in seeds:
             wandb_name = f"{test_name}_{args.num_strokes}strokes_seed{seed}"
             if multiprocess:
@@ -284,6 +293,6 @@ if __name__ == "__main__":
             P.join()  # start processes
             
         sorted_final = dict(sorted(losses_all.items(), key=lambda item: item[1]))
-        if sorted_final:  # 确保字典不为空
+        if sorted_final:
             copyfile(f"{output_dir}/{list(sorted_final.keys())[0]}/best_iter.svg",
                     f"{output_dir}/{list(sorted_final.keys())[0]}_best.svg")
